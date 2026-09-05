@@ -1,0 +1,27 @@
+# Preparation notes, not part of the submission. This one grades my own answers
+# to a mock review; it must not reach a reviewer by accident.
+REVIEW-DRILL.md
+CODE-REVIEW.md
+
+# Local credentials. backend/.env holds a live Jira API token during testing.
+.env
+.env.*
+!.env.example
+
+# Build output
+backend/web/dist/*
+!backend/web/dist/.gitkeep
+frontend/dist/
+frontend/node_modules/
+node_modules/
+
+*.tsbuildinfo
+
+# Go
+*.test
+*.out
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

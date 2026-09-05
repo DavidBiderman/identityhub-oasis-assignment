@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+/* A small, deliberate palette. The interface is a security tool, so colour
+   carries meaning -- state, severity, provenance -- rather than decoration. */
+@theme {
+  --color-canvas: oklch(0.985 0.002 250);
+  --color-surface: oklch(1 0 0);
+  --color-line: oklch(0.92 0.004 250);
+  --color-ink: oklch(0.22 0.01 250);
+  --color-muted: oklch(0.52 0.012 250);
+  --color-accent: oklch(0.55 0.16 264);
+  --color-accent-ink: oklch(0.99 0 0);
+  --color-danger: oklch(0.55 0.19 25);
+  --color-warn: oklch(0.72 0.15 75);
+  --color-ok: oklch(0.6 0.13 155);
+}
+
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-canvas: oklch(0.18 0.008 250);
+    --color-surface: oklch(0.22 0.01 250);
+    --color-line: oklch(0.3 0.012 250);
+    --color-ink: oklch(0.95 0.004 250);
+    --color-muted: oklch(0.68 0.012 250);
+    --color-accent: oklch(0.68 0.15 264);
+    --color-accent-ink: oklch(0.16 0.01 250);
+  }
+}
+
+@layer base {
+  html {
+    color-scheme: light dark;
+  }
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* A visible focus ring is an accessibility requirement, not a style choice. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}

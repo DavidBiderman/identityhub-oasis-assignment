@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IdentityHub API</title>
+    <link rel="stylesheet" href="/docs/swagger-ui.css" />
+    <style>
+      body { margin: 0; background: #fafafa; }
+      .topbar { display: none; }
+      .hint {
+        font: 14px/1.5 system-ui, sans-serif; color: #3b3b3b; background: #fff;
+        border-bottom: 1px solid #e3e3e3; padding: 16px 20px; margin: 0;
+      }
+      .hint code {
+        background: #f1f1f1; border-radius: 3px; padding: 1px 5px;
+        font: 13px ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .aside { color: #6b6b6b; display: inline-block; margin-top: 6px; }
+      .identity {
+        font: 13px system-ui, sans-serif; cursor: pointer;
+        background: #fff; border: 1px solid #c8c8c8; border-radius: 4px;
+        padding: 3px 9px; color: #3b3b3b;
+      }
+      .identity:hover { border-color: #4990e2; color: #1f6fc4; }
+
+      /* The sign-in gate. Centred, narrow, and deliberately plain: it is a
+         door, not a page. */
+      .gate {
+        display: flex; align-items: center; justify-content: center;
+        min-height: 100vh; background: #fafafa;
+      }
+      .signin {
+        width: 100%; max-width: 22rem; background: #fff; padding: 28px;
+        border: 1px solid #e3e3e3; border-radius: 6px;
+        font: 14px/1.5 system-ui, sans-serif; color: #3b3b3b;
+      }
+      .signin h1 { font-size: 18px; margin: 0 0 4px; }
+      .signin .lede { margin: 0 0 20px; color: #6b6b6b; }
+      .signin label {
+        display: block; font-size: 12px; font-weight: 600; margin: 14px 0 4px;
+        text-transform: uppercase; letter-spacing: 0.03em; color: #6b6b6b;
+      }
+      .signin input {
+        width: 100%; box-sizing: border-box; padding: 8px 10px; font: inherit;
+        border: 1px solid #c8c8c8; border-radius: 4px;
+      }
+      .signin input:focus { outline: 2px solid #4990e2; outline-offset: 1px; }
+      .signin button[type="submit"] {
+        width: 100%; margin-top: 20px; padding: 9px; font: inherit;
+        font-weight: 600; color: #fff; background: #1f6fc4;
+        border: 0; border-radius: 4px; cursor: pointer;
+      }
+      .signin button[type="submit"]:hover { background: #185aa0; }
+      .signin button[type="submit"]:disabled { background: #9bb8d8; cursor: default; }
+      .failure {
+        margin: 14px 0 0; padding: 9px 11px; border-radius: 4px;
+        background: #fdf3f3; border: 1px solid #f0c9c9; color: #a33;
+      }
+      .signin .aside { display: block; margin: 20px 0 0; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <!-- The document this page renders is not public: it lists every endpoint,
+         field and constraint of an API that manages credentials. So the page
+         signs you in first, and fetches the spec with the token.
+
+         The sign-in form lives here rather than as a guard on the HTML because
+         a top-level browser navigation cannot carry an Authorization header --
+         gating the page itself would need a cookie, and this application does
+         not use one. Protecting the document is the part that matters; the
+         shell contains nothing. -->
+    <div id="gate" class="gate" hidden>
+      <form id="signin" class="signin" novalidate>
+        <h1>IdentityHub API</h1>
+        <p class="lede">Sign in to read the documentation and try the endpoints.</p>
+
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="username" required
+               placeholder="admin@acme.test" />
+
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="current-password" required />
+
+        <button type="submit" id="submit">Sign in</button>
+        <p id="failure" class="failure" hidden></p>
+
+        <p class="aside">
+          The seeded accounts are in the README. Signing in here is the same
+          request the application makes: <code>POST /api/auth/signin</code>.
+        </p>
+      </form>
+    </div>
+
+    <div id="loaded" hidden>
+      <p class="hint">
+        Every endpoint here is live against the running stack, authorized as
+        <strong id="who"></strong>. Nothing to paste: the token from signing in
+        is already filled in.
+        <button type="button" class="identity" id="signout">Sign out</button>
+        <br />
+        <span class="aside">
+          <strong>Authorize</strong> offers a second scheme,
+          <code>apiKey</code>. It is only for <code>POST /api/v1/findings</code>,
+          the endpoint scanners and CI pipelines use. Mint one at
+          <code>POST /api/api-keys</code> and paste it there; leave it empty
+          otherwise.
+        </span>
+      </p>
+      <div id="swagger"></div>
+    </div>
+
+    <!-- Served from the image, not a CDN: `docker compose up` has to work on a
+         machine with no network, and a documentation page that only renders
+         online is not documentation. -->
+    <script src="/docs/swagger-ui-bundle.js"></script>
+    <script>
+      // The same key the application uses, on the same origin. Signing in to
+      // either unlocks both, and signing out of either ends both -- one origin,
+      // one session, rather than two things a person has to keep in step.
+      const KEY = "identityhub.token";
+
+      const gate = document.getElementById("gate");
+      const loaded = document.getElementById("loaded");
+      const failure = document.getElementById("failure");
+
+      function show(error) {
+        failure.textContent = error;
+        failure.hidden = !error;
+      }
+
+      // Renders swagger-ui with the token already applied.
+      //
+      // requestInterceptor covers the fetch of the document itself, which
+      // happens before any Authorize state exists; preauthorizeApiKey fills in
+      // the accessToken scheme so "Try it out" works on the first click.
+      function render(token, claims) {
+        document.getElementById("who").textContent =
+          claims.email + " — " + (claims.roles || []).join(", ");
+
+        const ui = SwaggerUIBundle({
+          url: "/openapi.yaml",
+          dom_id: "#swagger",
+          presets: [SwaggerUIBundle.presets.apis],
+          plugins: [SwaggerUIBundle.plugins.DownloadUrl],
+          layout: "BaseLayout",
+          deepLinking: true,
+          persistAuthorization: true,
+          tryItOutEnabled: true,
+          defaultModelsExpandDepth: 0,
+          docExpansion: "list",
+          requestInterceptor: (request) => {
+            // Same origin only. This token is ours and belongs nowhere else.
+            if (request.url.startsWith("/") || request.url.startsWith(location.origin)) {
+              request.headers.Authorization = "Bearer " + token;
+            }
+            return request;
+          },
+          onComplete: () => ui.preauthorizeApiKey("accessToken", token),
+        });
+        window.ui = ui;
+
+        gate.hidden = true;
+        loaded.hidden = false;
+      }
+
+      // A token is only useful here if the API still accepts it: it may have
+      // expired, or been signed out from the application in another tab.
+      async function claimsFor(token) {
+        const response = await fetch("/api/auth/me", {
+          headers: { Authorization: "Bearer " + token },
+        });
+        if (!response.ok) return null;
+        return (await response.json()).data;
+      }
+
+      document.getElementById("signin").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        show("");
+
+        const button = document.getElementById("submit");
+        button.disabled = true;
+        try {
+          const response = await fetch("/api/auth/signin", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              email: document.getElementById("email").value,
+              password: document.getElementById("password").value,
+            }),
+          });
+          const payload = await response.json();
+          if (!response.ok) {
+            // The API answers the same way for an unknown address and a wrong
+            // password. Repeating its message keeps them indistinguishable here.
+            show(payload.error ? payload.error.message : "Could not sign in.");
+            return;
+          }
+
+          const token = payload.data.accessToken;
+          sessionStorage.setItem(KEY, token);
+          render(token, await claimsFor(token));
+        } catch (error) {
+          show("Could not reach the API. Is the stack running?");
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      document.getElementById("signout").addEventListener("click", async () => {
+        const token = sessionStorage.getItem(KEY);
+        if (token) {
+          // Tell the server first, so the token stops being accepted rather
+          // than merely being forgotten here.
+          await fetch("/api/auth/signout", {
+            method: "POST",
+            headers: { Authorization: "Bearer " + token },
+          }).catch(() => undefined);
+        }
+        sessionStorage.removeItem(KEY);
+        location.reload();
+      });
+
+      // Already signed in elsewhere on this origin? Then do not ask again.
+      (async () => {
+        const token = sessionStorage.getItem(KEY);
+        const claims = token ? await claimsFor(token) : null;
+        if (claims) {
+          render(token, claims);
+        } else {
+          sessionStorage.removeItem(KEY);
+          gate.hidden = false;
+        }
+      })();
+    </script>
+  </body>
+</html>

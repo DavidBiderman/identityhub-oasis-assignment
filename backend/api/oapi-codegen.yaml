@@ -1,0 +1,34 @@
+# What is generated from api/openapi.yaml, and why.
+#
+# The document is the source of truth for this API in three different ways, and
+# it is worth being exact about which:
+#
+#   routing        generated. An operation in the document with no method on the
+#                  Server does not compile.
+#   authorization  read at startup, not generated. Server.guards builds each
+#                  operation's middleware from its security section, and an
+#                  unknown scheme or role stops the process from booting.
+#   shapes         checked at test time. Every response the end-to-end suite
+#                  receives is validated against the document
+#                  (harness.validateAgainstSpec), so a field renamed in a
+#                  handler and not in the document fails the build.
+#
+# The third one is why the model types below are worth generating even though
+# handlers answer with their own structs: the enforcement is the document
+# itself, read at runtime by kin-openapi, and the types come from the same flag
+# as the parameter structs the handlers do use.
+package: apigen
+output: internal/httpapi/apigen/apigen.gen.go
+generate:
+  # One method per operation. The Server implements this interface, so an
+  # operation added to the spec and not implemented is a compile error.
+  echo-server: true
+  # The parameter structs for query, path and header values, which handler
+  # signatures take. This flag also emits a type per schema; those have no
+  # callers, because what enforces a shape is the document itself at test time
+  # rather than a Go type nobody passes around.
+  models: true
+output-options:
+  # Every response is an envelope with an optional data and an optional error,
+  # so a pointer for an absent field is the truthful representation.
+  nullable-type: true

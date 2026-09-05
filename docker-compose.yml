@@ -1,0 +1,261 @@
+name: identityhub
+
+# One command brings up the whole system:
+#
+#   docker compose up --build
+#
+# Then open http://localhost:3000 and sign in as admin@acme.test with the
+# password identityhub-demo. Three seeded people across two accounts; the README
+# lists them.
+#
+# Temporal's own interface is at http://localhost:8233, where the blog digest
+# schedule and every ticket-filing workflow are visible.
+
+services:
+  # --- Data ---------------------------------------------------------------
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: identityhub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-identityhub}
+      POSTGRES_DB: identityhub
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U identityhub -d identityhub"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Where signed-out tokens are remembered until they expire on their own.
+  #
+  # An access token is self-contained: nothing about it is stored when it is
+  # issued, and nothing can recall it. Signing out therefore has to record that
+  # one particular token is no longer welcome, and that record has to live
+  # exactly as long as the token would have -- after which the token is refused
+  # for being expired anyway.
+  #
+  # That is a key with a deadline, which is what Redis is. The record expires
+  # itself, and the check is a lookup on the hot path of every authenticated
+  # request. No volume: this state is meant to be lost, and losing it costs at
+  # most the remaining lifetime of tokens signed out in the last hour.
+  redis:
+    image: redis:7-alpine
+    # Append-only file off, deliberately. Nothing here outlives an hour.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Local AWS KMS. Floci speaks the real KMS wire protocol with no account and
+  # no auth token, so the key-management code path in development is the one
+  # that runs against AWS KMS in production -- only SECRETS_KEEPER_URL differs.
+  #
+  # Persistent storage is not optional here: the customer managed key wraps
+  # every stored credential, so losing it on restart would make every saved
+  # connection undecryptable.
+  kms:
+    image: floci/floci:latest
+    environment:
+      FLOCI_STORAGE_MODE: persistent
+      FLOCI_STORAGE_PERSISTENT_PATH: /app/data
+    ports:
+      - "${KMS_PORT:-4566}:4566"
+    volumes:
+      - kmsdata:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:4566/_floci/health || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Temporal dev server: server, web interface and SQLite persistence in one
+  # container. Production runs the full server against Postgres; the workflow,
+  # activity and client code are identical either way.
+  temporal:
+    image: temporalio/temporal:latest
+    # The image runs as uid 1000, which cannot write to a fresh named volume.
+    # This is the local dev server only.
+    user: root
+    command:
+      - server
+      - start-dev
+      - --ip
+      - 0.0.0.0
+      - --port
+      - "7233"
+      - --ui-port
+      - "8233"
+      - --db-filename
+      - /data/temporal.db
+      - --namespace
+      - identityhub
+    ports:
+      - "${TEMPORAL_PORT:-7233}:7233"
+      # Temporal's web interface. Worth opening: the blog digest schedule and
+      # every ticket-filing workflow, including retries, are visible here.
+      #
+      # It is served by the dev server itself rather than by a separate
+      # container, so the stack has one Temporal service and not two.
+      - "${TEMPORAL_UI_PORT:-8233}:8233"
+    volumes:
+      - temporaldata:/data
+    healthcheck:
+      test: ["CMD", "temporal", "workflow", "list", "--address", "127.0.0.1:7233", "--namespace", "identityhub"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  # --- One-shot setup -----------------------------------------------------
+
+  # Applies the schema, then exits. The API waits for it so that it never races
+  # a partially migrated database.
+  migrate:
+    build:
+      context: ./backend
+      target: migrate
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://identityhub:identityhub@postgres:5432/identityhub?sslmode=disable}
+      # The password given to the role the API and worker connect as. The
+      # default is fine locally and is refused when APP_ENV=production.
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-identityhub_app}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # Creates the customer managed key the credentials are encrypted under, and
+  # the demo organization, accounts and users. Both are idempotent, so a
+  # restart is harmless.
+  bootstrap:
+    build:
+      context: ./backend
+      target: bootstrap
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://identityhub:identityhub@postgres:5432/identityhub?sslmode=disable}
+      AWS_ENDPOINT_URL: http://kms:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      KMS_ALIAS: ${KMS_ALIAS:-alias/identityhub}
+    depends_on:
+      kms:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  # --- Application --------------------------------------------------------
+
+  api:
+    build:
+      context: ./backend
+      target: api
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_ADDR: ":8080"
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
+      # The application connects as identityhub_app, which can read and write
+      # rows but cannot change the schema. Migrations run as the owner.
+      DATABASE_URL: ${APP_DATABASE_URL:-postgres://identityhub_app:${APP_DB_PASSWORD:-identityhub_app}@postgres:5432/identityhub?sslmode=disable}
+      SECRETS_KEEPER_URL: ${SECRETS_KEEPER_URL:-awskms://alias/identityhub}
+      AWS_ENDPOINT_URL: http://kms:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      TEMPORAL_HOSTPORT: temporal:7233
+      TEMPORAL_NAMESPACE: identityhub
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # An override. Unset, the digest files into the first project the
+      # connected account can reach.
+      DIGEST_PROJECT_KEY: ${DIGEST_PROJECT_KEY:-}
+
+      # Access tokens are signed with HMAC-SHA256 by this key, and verified
+      # with it. A real deployment federates instead -- the identity provider
+      # signs, and this application verifies against its published key -- and
+      # then this variable does not exist.
+      #
+      # The default is published in this repository, which is why configuration
+      # refuses it when APP_ENV=production: anyone holding it can mint a token
+      # for any tenant.
+      TOKEN_SIGNING_KEY: ${TOKEN_SIGNING_KEY:-dev-signing-key-not-for-production}
+      TOKEN_ISSUER: ${TOKEN_ISSUER:-https://identityhub.local}
+      TOKEN_AUDIENCE: ${TOKEN_AUDIENCE:-identityhub}
+      TOKEN_TTL: ${TOKEN_TTL:-1h}
+    ports:
+      # The browser reaches the API through the frontend proxy on port 3000,
+      # which is what keeps it a single origin. This direct port is published
+      # so that the public REST API can be exercised with curl without going
+      # through the proxy -- convenient for a reviewer, and for scanners and CI
+      # pipelines, which are the endpoint's real callers.
+      - "${API_PORT:-8080}:8080"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app/api", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # Durable execution. A separate process from the API on purpose: the API is
+  # request/response, and a worker that dies should not take the web tier down.
+  worker:
+    build:
+      context: ./backend
+      target: worker
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: ${APP_DATABASE_URL:-postgres://identityhub_app:${APP_DB_PASSWORD:-identityhub_app}@postgres:5432/identityhub?sslmode=disable}
+      SECRETS_KEEPER_URL: ${SECRETS_KEEPER_URL:-awskms://alias/identityhub}
+      AWS_ENDPOINT_URL: http://kms:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      TEMPORAL_HOSTPORT: temporal:7233
+      TEMPORAL_NAMESPACE: identityhub
+      BLOG_FEED_URL: ${BLOG_FEED_URL:-https://www.oasis.security/blog}
+
+      # Optional. "auto" uses whichever model key is configured and falls back
+      # to an offline summarizer when neither is, so the stack runs with no
+      # model account and no network access.
+      SUMMARIZER_PROVIDER: ${SUMMARIZER_PROVIDER:-auto}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+
+  # The single origin the browser talks to: static files from here, /api
+  # proxied to the API. That removes CORS entirely -- including for the Swagger
+  # page, which calls the same origin it was served from. There are no cookies
+  # anywhere in this application: the access token is a Bearer header held in
+  # sessionStorage, which is also why nothing here needs CSRF protection.
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "${WEB_PORT:-3000}:8080"
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  pgdata:
+  kmsdata:
+  temporaldata:

@@ -1,0 +1,56 @@
+version: "2"
+sql:
+  - engine: postgresql
+    # The schema is the migrations themselves, so a query is checked against
+    # the tables that actually exist rather than a second copy that can drift.
+    schema: "db/migrations"
+    queries: "db/queries"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/store/sqlcgen"
+        sql_package: "pgx/v5"
+
+        # Nullable columns become pointers, so "this can be absent" is visible
+        # in the type rather than discovered at runtime.
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true
+        emit_prepared_queries: false
+
+        # JSON tags on the generated types, so a row a query already shaped for
+        # display can be returned as-is instead of being copied field by field
+        # into a near-identical struct written by hand. What a caller sees is
+        # then decided by the select list, which is checked against the schema,
+        # rather than by a second definition that can drift from it.
+        emit_json_tags: true
+        json_tags_case_style: "camel"
+
+        # Postgres types mapped onto the ones the rest of the codebase uses, so
+        # generated code needs no translation layer around it.
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              type: "UUID"
+              import: "github.com/google/uuid"
+              pointer: true
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+          - db_type: "timestamptz"
+            nullable: true
+            go_type:
+              type: "Time"
+              import: "time"
+              pointer: true
+          - db_type: "inet"
+            go_type: "net/netip.Addr"
+          - db_type: "inet"
+            nullable: true
+            go_type:
+              type: "Addr"
+              import: "net/netip"
+              pointer: true
+          - db_type: "jsonb"
+            go_type: "encoding/json.RawMessage"

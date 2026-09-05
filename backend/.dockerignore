@@ -1,0 +1,7 @@
+# Never let a live credential into a build context or an image layer.
+.env
+.env.*
+
+# Not needed to build, and copying them invalidates layer caching.
+*_test.go
+testdata/

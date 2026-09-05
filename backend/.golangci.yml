@@ -1,0 +1,28 @@
+# Two rules are turned off, each for a reason specific to this codebase.
+# Everything else golangci-lint enables by default is on, and `make lint` fails
+# on it.
+version: "2"
+
+linters:
+  exclusions:
+    rules:
+      # ST1005 wants error strings lowercase and unpunctuated, which is right
+      # for errors that get wrapped into a sentence by their caller. These are
+      # the opposite: they are the sentence. An error declared in this
+      # application carries the text the API returns and a person reads, and
+      # nothing rewrites it on the way out -- that is the point of the error
+      # handling here. "no issue tracker is connected" is not a better message
+      # than the one that ships.
+      - linters: [staticcheck]
+        text: "ST1005"
+
+      # S1016 wants a type conversion where two structs have identical fields.
+      # In this file they are identical by coincidence and separate by design:
+      # one set is Jira's model, the other is the issue-tracker contract's
+      # shapes, and the file exists to translate between them. A conversion
+      # would hide that there are two vocabularies and would silently start
+      # failing to compile the day one of them gains a field -- which is a
+      # sound signal, but not worth losing the mapping a reader can see.
+      - linters: [staticcheck]
+        text: "S1016"
+        path: internal/connector/jira/issuetracker\.go

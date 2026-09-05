@@ -1,0 +1,1122 @@
+openapi: 3.0.3
+
+info:
+  title: IdentityHub
+  version: "1.0.0"
+  description: |
+    IdentityHub files non-human-identity findings as tickets in whatever issue
+    tracker an account has connected.
+
+    ## Two APIs, one document
+
+    `/api/*` is the browser API, authenticated by an access token from an
+    identity provider. `/api/v1/*` is the public API, authenticated by an API
+    key, for scanners and CI pipelines. They are versioned separately because
+    the second is a contract with systems we do not control and the first is not.
+
+    ## Tenancy
+
+    No request body, query parameter or header names an organization or an
+    account. Both come from the credential, so acting in another tenancy would
+    mean forging one. The request schemas below have no field for it, which is
+    the point: it is absent from the vocabulary rather than rejected by a check.
+
+    ## Errors
+
+    Every response is the same envelope: `data` on success, `error` on failure.
+    `error.code` is stable and safe to branch on; `error.message` is written for
+    a person; `error.fields` names the inputs to fix, keyed by field name.
+
+servers:
+  # Relative, so a request goes to whatever origin is serving this document.
+  #
+  # The documentation page is served by the reverse proxy in front of the API,
+  # and the proxy forwards /api to it. An absolute address here would make the
+  # browser send a cross-origin request instead, which fails preflight because
+  # this API sets no CORS headers -- and it sets none because nothing needs to
+  # call it from another origin.
+  - url: /
+    description: Wherever this document is being served from
+
+tags:
+  - name: Session
+    description: Who the caller is.
+  - name: Connections
+    description: Integrations an account has connected, and what it takes to connect one.
+  - name: Targets
+    description: Where findings can be filed.
+  - name: Tickets
+    description: Findings filed from the interface.
+  - name: API keys
+    description: Machine credentials for the public API.
+  - name: Audit
+    description: Security-relevant actions.
+  - name: Digest
+    description: The recurring NHI Blog Digest.
+  - name: Findings
+    description: The public API, for scanners and CI pipelines.
+  - name: Operations
+    description: Health, and the development identity provider stand-in.
+
+security:
+  - accessToken: []
+
+paths:
+  /healthz:
+    get:
+      operationId: health
+      tags: [Operations]
+      summary: Liveness
+      description: Unauthenticated by design; an orchestrator must be able to ask without credentials.
+      security: []
+      responses:
+        "200":
+          description: The process is running.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StatusEnvelope" }
+
+  /readyz:
+    get:
+      operationId: ready
+      tags: [Operations]
+      summary: Readiness
+      description: Reports whether dependencies are reachable, so traffic can be held until they are.
+      security: []
+      responses:
+        "200":
+          description: Ready.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+        "503":
+          description: A dependency is unreachable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+
+  /api/auth/signin:
+    post:
+      operationId: signIn
+      tags: [Session]
+      summary: Exchange an email address and a password for an access token
+      description: |
+        Unauthenticated by necessity: this is how a caller obtains a credential.
+
+        **A real deployment does not have this endpoint.** An identity provider
+        -- Auth0, Clerk, Okta -- authenticates the person and issues the token,
+        and this application reads it either way. It is here because the token
+        it mints is the same token every other path consumes, which is what
+        makes that swap a change to one file.
+
+        An unknown address and a wrong password answer identically. Telling them
+        apart would make this a way to ask who has an account here.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SignInRequest" }
+      responses:
+        "200":
+          description: Signed in. The token goes in the Authorization header.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SignInEnvelope" }
+        "400": { $ref: "#/components/responses/Malformed" }
+        "401":
+          description: The email address or password is incorrect.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /api/auth/me:
+    get:
+      operationId: whoAmI
+      tags: [Session]
+      summary: What the caller's token says about them
+      description: |
+        Reports the account being acted in. Returning it changes nothing about
+        trust: the value came from the token, and sending it back does not make
+        it settable.
+      responses:
+        "200":
+          description: The caller's own claims.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MeEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/auth/signout:
+    post:
+      operationId: signOut
+      tags: [Session]
+      summary: Stop honouring the caller's token
+      description: |
+        Ends this application's acceptance of the access token presented on the
+        request. The token is refused from here until its own `exp`, whoever
+        presents it and wherever it was copied to.
+
+        This does not end the identity provider's session, which is the
+        provider's to end -- in a real deployment the interface follows this
+        with an RP-initiated logout redirect.
+
+        Presenting the same token again returns `401`, including to a second
+        sign-out: it is refused before any handler runs. A token carrying no
+        `jti` cannot be named, and is refused with `422`.
+      responses:
+        "204":
+          description: The token will not be accepted again.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422":
+          description: The token carries no `jti`, so it cannot be named.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /api/connections:
+    get:
+      operationId: listConnections
+      tags: [Connections]
+      summary: This account's integrations, and what could be added
+      description: |
+        `availableTypes` carries each connector's own configuration
+        requirements, so a form can be built without knowing which connector it
+        is for. A field of kind `secret` must never be echoed back.
+      responses:
+        "200":
+          description: Connections and available connector types.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConnectionListEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: connect
+      tags: [Connections]
+      summary: Connect an integration
+      description: |
+        The credential is verified before it is stored: the connector resolves
+        where its API lives, checks that the token is allowed to do everything
+        this product needs, and only then is the configuration encrypted and
+        written. A token missing a scope is refused here, naming the scope,
+        rather than failing on the first ticket somebody files.
+      security:
+        - accessToken: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConnectRequest" }
+      responses:
+        "201":
+          description: Connected. Findings can now be filed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConnectedEnvelope" }
+        "400": { $ref: "#/components/responses/Malformed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/connections/{type}:
+    delete:
+      operationId: disconnect
+      tags: [Connections]
+      summary: Disconnect an integration
+      description: Revokes the stored credential and stops the recurring digest.
+      security:
+        - accessToken: [admin]
+      parameters:
+        - name: type
+          in: path
+          required: true
+          description: The connector type, as reported in `availableTypes`.
+          schema: { type: string, example: jira }
+      responses:
+        "204": { description: Disconnected. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/projects:
+    get:
+      operationId: listTargets
+      tags: [Targets]
+      summary: Where findings can be filed
+      description: |
+        Read live from the connected provider, so the picker offers projects
+        that exist and that the connected credential can see. There is no local
+        copy to go stale.
+      parameters:
+        - name: query
+          in: query
+          required: false
+          description: Filters by name or key.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Projects, most recently active first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TargetListEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/NotConnected" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /api/projects/{key}/issue-types:
+    get:
+      operationId: listKinds
+      tags: [Targets]
+      summary: The kinds of ticket a project accepts
+      description: |
+        Issue types are configured per project, so they are discovered rather
+        than assumed. Only types the connected account can actually create are
+        returned.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/ProjectKey" }
+      responses:
+        "200":
+          description: The creatable issue types.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KindListEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/NotConnected" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/tickets:
+    get:
+      operationId: listTickets
+      tags: [Tickets]
+      summary: The most recent tickets this application created
+      description: |
+        Our own records, not a provider-side search. A label on the provider is
+        mutable by anyone with access and cannot answer "created from this app";
+        this table can. Live status is layered on top where it is available, and
+        its absence never fails the list.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+        - name: projectKey
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/ProjectKey" }
+      responses:
+        "200":
+          description: Tickets, newest first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TicketListEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    post:
+      operationId: createTicket
+      tags: [Tickets]
+      summary: File a finding
+      description: |
+        Filing is durable: a Temporal workflow files the ticket upstream and
+        records it locally, so a crash between the two cannot leave a ticket the
+        interface never shows.
+
+        The request waits briefly for the workflow. The common case answers
+        **201** with the created ticket. A slow provider answers **202** with a
+        workflow id -- the ticket is still being filed and appears in the recent
+        list when it lands. A client must branch on the status: the two bodies
+        are different shapes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateTicketRequest" }
+      responses:
+        "200":
+          description: |
+            A replay. An earlier request with the same `Idempotency-Key` filed
+            this ticket, and `created` is `false`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FiledTicketEnvelope" }
+        "201":
+          description: Filed. `created` is `true`.
+          headers:
+            Location:
+              description: Where the ticket can be read back.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FiledTicketEnvelope" }
+        "202":
+          description: Still being filed. It will appear in the recent tickets list.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PendingTicketEnvelope" }
+        "400": { $ref: "#/components/responses/Malformed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/NotConnected" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+        "503": { $ref: "#/components/responses/QueueUnavailable" }
+
+  /api/tickets/{id}:
+    get:
+      operationId: getTicket
+      tags: [Tickets]
+      summary: One recorded ticket
+      description: What the `Location` header of a 201 points at.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      security:
+        # Both credentials, because both can have filed the ticket. The 201 on
+        # POST /api/v1/findings returns a Location pointing here, and that
+        # header is answered by an API key -- so refusing one would hand a
+        # caller a link it cannot follow.
+        - accessToken: []
+        - apiKey: []
+      responses:
+        "200":
+          description: The ticket.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TicketEnvelope" }
+        "400": { $ref: "#/components/responses/Malformed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/api-keys:
+    get:
+      operationId: listAPIKeys
+      tags: [API keys]
+      summary: This account's machine credentials
+      description: |
+        `lastUsedAt` is here deliberately. A key that has never been used, or
+        has not been used in months, is a non-human identity worth retiring --
+        which is this product's own subject matter applied to itself.
+      security:
+        - accessToken: [admin]
+      responses:
+        "200":
+          description: Keys, newest first. No secret is included.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIKeyListEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createAPIKey
+      tags: [API keys]
+      summary: Mint a key
+      description: |
+        The secret is returned exactly once and is not recoverable afterwards:
+        only its hash is stored.
+      security:
+        - accessToken: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateAPIKeyRequest" }
+      responses:
+        "201":
+          description: Created. Copy the secret now.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedAPIKeyEnvelope" }
+        "400": { $ref: "#/components/responses/Malformed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/api-keys/{id}:
+    delete:
+      operationId: revokeAPIKey
+      tags: [API keys]
+      summary: Revoke a key
+      description: |
+        Revocation is a timestamp rather than a delete, so audit events
+        referencing the key stay resolvable. An unknown key, another account's
+        key and an already-revoked key are all reported as 404, so the response
+        cannot be used to discover that a key exists.
+      security:
+        - accessToken: [admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204": { description: Revoked. }
+        "400": { $ref: "#/components/responses/Malformed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/audit:
+    get:
+      operationId: listAuditEvents
+      tags: [Audit]
+      summary: This account's recent security-relevant actions
+      description: |
+        Append-only: nothing updates or deletes an audit event, and the
+        application's database role has UPDATE and DELETE revoked on the table.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: Events, newest first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditListEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/digest:
+    get:
+      operationId: getDigest
+      tags: [Digest]
+      summary: The recurring NHI Blog Digest for this account
+      description: |
+        Connecting an integration creates a schedule that reads the Oasis blog
+        every 24 hours, summarises each post it has not seen before, and files a
+        ticket for it. Temporal owns the schedule, so it survives restarts and
+        needs no reconciliation at boot.
+
+        The digest is external to the interface by design -- nothing here has to
+        be clicked for it to run -- but a feature that only proves itself a day
+        later is a feature nobody checks, so its state is readable and a run can
+        be started on demand.
+      responses:
+        "200":
+          description: The schedule, or that there is none.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DigestEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: runDigest
+      tags: [Digest]
+      summary: Run the digest now
+      description: |
+        Starts a run immediately instead of waiting for the next scheduled one.
+        A run already in progress is not duplicated.
+
+        Filing is deduplicated by the unique index on the catalogued post, so
+        running twice files nothing twice -- the second run finds every post
+        already catalogued and skips it.
+      responses:
+        "202":
+          description: Started. Tickets appear in the recent list as they are filed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DigestEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/QueueUnavailable" }
+
+  /api/v1/findings:
+    post:
+      operationId: createFinding
+      tags: [Findings]
+      summary: File a finding from a scanner or a CI pipeline
+      description: |
+        The public API. The organization and account come from the API key,
+        exactly as they come from an access token on the browser API.
+
+        Send an `Idempotency-Key` to make a retry safe: the first request files
+        the ticket, and a replay returns the original with **200** instead of
+        filing a second. Reusing a key with a different body is refused.
+      security:
+        - apiKey: ["findings:write"]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Makes a retry safe. At most 200 characters.
+          schema: { type: string, maxLength: 200 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateFindingRequest" }
+      responses:
+        "200":
+          description: |
+            A replay. An earlier request with the same `Idempotency-Key` filed
+            this ticket, and `created` is `false`. Nothing was filed twice.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FiledTicketEnvelope" }
+        "201":
+          description: Filed. `created` is `true`.
+          headers:
+            Location:
+              description: Where the ticket can be read back.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FiledTicketEnvelope" }
+        "202":
+          description: Still being filed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PendingTicketEnvelope" }
+        "400": { $ref: "#/components/responses/Malformed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: |
+            No tracker is connected, the stored credential was rejected, or this
+            Idempotency-Key was used with a different body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "502": { $ref: "#/components/responses/ProviderUnavailable" }
+        "503": { $ref: "#/components/responses/QueueUnavailable" }
+
+components:
+  securitySchemes:
+    accessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        An access token issued by an identity provider. This application
+        authenticates nobody: it reads the organization, account and roles from
+        the token's claims.
+
+        `POST /api/auth/signin` issues one. `make token` prints one ready to
+        paste in.
+    apiKey:
+      type: http
+      scheme: bearer
+      description: |
+        An IdentityHub API key, `ih_<id>_<secret>`, minted at
+        `POST /api/api-keys`. The tenancy is the key's own.
+
+  responses:
+    Malformed:
+      description: The request could not be read.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Unauthorized:
+      description: |
+        No credential, or one that was not accepted. A rejected credential and
+        an unknown one answer identically, so the response cannot be used to
+        probe which is which.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Forbidden:
+      description: The credential is valid but not permitted to do this.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    NotFound:
+      description: No such resource in this account.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    NotConnected:
+      description: |
+        No usable integration. Either none is connected, or the stored
+        credential was rejected and the integration must be reconnected.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    ValidationFailed:
+      description: |
+        One or more fields are invalid. `error.fields` names each one, keyed by
+        the field in the request.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    ProviderUnavailable:
+      description: |
+        The provider could not be reached, or answered in a way this
+        application could not use. 502 rather than 500, because the failure is
+        upstream and retrying is reasonable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    QueueUnavailable:
+      description: The durable execution queue is unavailable. Try again shortly.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error: { $ref: "#/components/schemas/Failure" }
+
+    StatusEnvelope:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            status: { type: string, example: ok }
+
+    Failure:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable and safe to branch on.
+          enum:
+            - malformed_request
+            - validation_failed
+            - unauthorized
+            - forbidden
+            - not_found
+            - conflict
+            - internal_error
+            - not_connected
+            - credential_rejected
+            - connection_unusable
+            - provider_rejected
+            - provider_not_found
+            - provider_rate_limited
+            - provider_unavailable
+            - unsupported_operation
+            - idempotency_key_reused
+            - idempotency_key_in_progress
+            - queue_unavailable
+        message:
+          type: string
+          description: Written for a person. Safe to show verbatim.
+        fields:
+          type: object
+          description: The inputs to fix, keyed by field name.
+          additionalProperties: { type: string }
+
+    Readiness:
+      type: object
+      properties:
+        ready: { type: boolean }
+        checks:
+          type: object
+          additionalProperties: { type: string }
+
+    ProjectKey:
+      type: string
+      pattern: "^[A-Z][A-Z0-9_]{0,63}$"
+      example: NHI
+      description: Uppercase letters, digits or underscores, starting with a letter.
+
+    MeEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/Me" }
+        error: { $ref: "#/components/schemas/Failure" }
+
+    Me:
+      type: object
+      required: [subject, email, name, roles, orgId, accountId]
+      properties:
+        subject: { type: string, description: The provider's stable identifier. }
+        email: { type: string }
+        name: { type: string }
+        roles:
+          type: array
+          items: { type: string, enum: [admin, member] }
+        orgId: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+
+    FieldKind:
+      type: string
+      enum: [text, url, email, secret]
+      description: |
+        How to render and validate the input. A `secret` must never be echoed
+        back: not in a response, not in a log, and not in the form after it is
+        submitted.
+
+    ConnectorField:
+      type: object
+      required: [name, label, kind, required]
+      properties:
+        name: { type: string, description: The key to send in the config object. }
+        label: { type: string }
+        kind: { $ref: "#/components/schemas/FieldKind" }
+        required: { type: boolean }
+        help: { type: string }
+        example: { type: string, description: A shape, never a real value. }
+
+    ConnectorType:
+      type: object
+      required: [type, fields]
+      properties:
+        type: { type: string, example: jira }
+        fields:
+          type: array
+          items: { $ref: "#/components/schemas/ConnectorField" }
+
+    Connection:
+      type: object
+      required: [id, connectorType, displayName, status, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        connectorType: { type: string }
+        displayName:
+          type: string
+          description: Whose credential this is, as the provider reports it.
+        metadata:
+          type: object
+          description: Non-secret configuration, so a listing needs no decryption.
+          additionalProperties: true
+        status: { type: string, enum: [active, invalid, revoked] }
+        lastVerifiedAt: { type: string, format: date-time, nullable: true }
+        lastError:
+          type: string
+          nullable: true
+          description: Why the credential was rejected, if it was.
+        createdAt: { type: string, format: date-time }
+
+    ConnectionListEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/ConnectionList" }
+        error: { $ref: "#/components/schemas/Failure" }
+
+    ConnectionList:
+      type: object
+      required: [connections, availableTypes]
+      properties:
+        connections:
+          type: array
+          items: { $ref: "#/components/schemas/Connection" }
+        availableTypes:
+          type: array
+          items: { $ref: "#/components/schemas/ConnectorType" }
+
+    ConnectRequest:
+      type: object
+      required: [connectorType, config]
+      properties:
+        connectorType: { type: string, example: jira }
+        config:
+          type: object
+          description: |
+            The connector's own configuration. Its shape is whatever that
+            connector's `fields` describe -- this API does not know what a Jira
+            credential looks like.
+          additionalProperties: true
+          example:
+            siteUrl: https://your-company.atlassian.net
+            email: automation@your-company.com
+            apiToken: ATATT3xFfGF0...
+
+    ConnectedEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/Connected" }
+        error: { $ref: "#/components/schemas/Failure" }
+
+    Connected:
+      type: object
+      required: [id, connectorType, owner]
+      properties:
+        id: { type: string, format: uuid }
+        connectorType: { type: string }
+        owner:
+          type: object
+          description: Whose credential the integration acts as. Never the credential.
+          properties:
+            id: { type: string }
+            email: { type: string }
+            displayName: { type: string }
+
+    Target:
+      type: object
+      required: [id, key, name]
+      properties:
+        id: { type: string }
+        key: { type: string, example: NHI }
+        name: { type: string }
+
+    TargetListEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/TargetList" }
+        error: { $ref: "#/components/schemas/Failure" }
+
+    TargetList:
+      type: object
+      required: [projects]
+      properties:
+        projects:
+          type: array
+          items: { $ref: "#/components/schemas/Target" }
+
+    Kind:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string }
+        name: { type: string, example: Task }
+
+    KindListEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/KindList" }
+        error: { $ref: "#/components/schemas/Failure" }
+
+    KindList:
+      type: object
+      required: [issueTypes]
+      properties:
+        issueTypes:
+          type: array
+          items: { $ref: "#/components/schemas/Kind" }
+
+    Ticket:
+      type: object
+      required: [id, projectKey, issueKey, issueUrl, title, source, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        projectKey: { $ref: "#/components/schemas/ProjectKey" }
+        issueKey: { type: string, example: NHI-42 }
+        issueUrl: { type: string, format: uri }
+        title: { type: string }
+        source: { type: string, enum: [ui, api, automation] }
+        status:
+          type: string
+          description: Live from the provider. Absent when it could not be reached.
+        createdAt: { type: string, format: date-time }
+
+    FiledTicket:
+      description: |
+        A ticket as a filing request answers with it: the ticket, plus whether
+        this request is what created it.
+
+        `created: false` means an earlier request with the same
+        `Idempotency-Key` already filed it and this is that ticket. It is a
+        success, not a conflict -- the caller asked for the finding to exist and
+        it does. The status code says the same thing (`200` rather than `201`);
+        this field says it in the body, so a client does not have to branch on
+        the status to find out.
+      allOf:
+        - $ref: "#/components/schemas/Ticket"
+        - type: object
+          required: [created]
+          properties:
+            created:
+              type: boolean
+              description: Whether this request filed the ticket, or found it already filed.
+
+    FiledTicketEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/FiledTicket" }
+        error: { $ref: "#/components/schemas/Failure" }
+
+    TicketEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/Ticket" }
+        error: { $ref: "#/components/schemas/Failure" }
+
+    TicketListEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/TicketList" }
+        error: { $ref: "#/components/schemas/Failure" }
+
+    TicketList:
+      type: object
+      required: [tickets]
+      properties:
+        tickets:
+          type: array
+          items: { $ref: "#/components/schemas/Ticket" }
+
+    PendingTicketEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/PendingTicket" }
+        error: { $ref: "#/components/schemas/Failure" }
+
+    PendingTicket:
+      type: object
+      required: [status, workflowId, detail]
+      properties:
+        status: { type: string, enum: [pending] }
+        workflowId: { type: string }
+        detail: { type: string }
+
+    CreateTicketRequest:
+      type: object
+      required: [projectKey, title, description]
+      properties:
+        projectKey: { $ref: "#/components/schemas/ProjectKey" }
+        issueTypeId:
+          type: string
+          description: Optional. A suitable type is chosen automatically.
+        title: { type: string, maxLength: 255 }
+        description: { type: string, maxLength: 32000 }
+
+    CreateFindingRequest:
+      type: object
+      required: [projectKey, title, description]
+      properties:
+        projectKey: { $ref: "#/components/schemas/ProjectKey" }
+        issueTypeId: { type: string }
+        title: { type: string, maxLength: 255 }
+        description: { type: string, maxLength: 32000 }
+        labels:
+          type: array
+          maxItems: 10
+          items: { type: string, pattern: "^[A-Za-z0-9._-]{1,64}$" }
+
+    DigestEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/Digest" }
+        error: { $ref: "#/components/schemas/Failure" }
+
+    Digest:
+      type: object
+      required: [scheduled, paused]
+      properties:
+        scheduled:
+          type: boolean
+          description: |
+            False when no integration is connected: the schedule is created on
+            connect and removed on disconnect, because a digest with no
+            credential has nothing to run with.
+        paused: { type: boolean }
+        projectKey:
+          type: string
+          description: |
+            Where it files, when DIGEST_PROJECT_KEY names a project. Absent
+            means it resolves the first project the account can reach, at run
+            time -- so the feature works without anybody looking a key up.
+        nextRunAt: { type: string, format: date-time, nullable: true }
+        lastRunAt: { type: string, format: date-time, nullable: true }
+        everyHours:
+          type: integer
+          description: How often it runs.
+
+    APIKey:
+      type: object
+      required: [id, keyId, name, scopes, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        keyId: { type: string, description: The public half. }
+        name: { type: string }
+        scopes:
+          type: array
+          items: { type: string, example: "findings:write" }
+        createdAt: { type: string, format: date-time }
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Never used is a non-human identity worth retiring.
+        revokedAt: { type: string, format: date-time, nullable: true }
+
+    APIKeyListEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/APIKeyList" }
+        error: { $ref: "#/components/schemas/Failure" }
+
+    APIKeyList:
+      type: object
+      required: [apiKeys]
+      properties:
+        apiKeys:
+          type: array
+          items: { $ref: "#/components/schemas/APIKey" }
+
+    CreateAPIKeyRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 100, example: nightly-scanner }
+
+    CreatedAPIKeyEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/CreatedAPIKey" }
+        error: { $ref: "#/components/schemas/Failure" }
+
+    CreatedAPIKey:
+      type: object
+      required: [apiKey, secret, notice]
+      properties:
+        apiKey: { $ref: "#/components/schemas/APIKey" }
+        secret:
+          type: string
+          description: The only plaintext copy. Not recoverable afterwards.
+          example: ih_a1b2c3d4e5f6_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        notice: { type: string }
+
+    AuditEvent:
+      type: object
+      required: [id, actorType, action, target, createdAt]
+      properties:
+        id: { type: integer, format: int64 }
+        actorType: { type: string, enum: [user, api_key, system] }
+        action: { type: string, example: jira.connected }
+        target: { type: string }
+        metadata:
+          type: object
+          description: Context for the action. Never credential material.
+          additionalProperties: true
+        createdAt: { type: string, format: date-time }
+
+    AuditListEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/AuditList" }
+        error: { $ref: "#/components/schemas/Failure" }
+
+    AuditList:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/AuditEvent" }
+
+    SignInRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, maxLength: 320 }
+        password: { type: string, format: password, minLength: 10, maxLength: 72 }
+
+    SignInEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/SignIn" }
+        error: { $ref: "#/components/schemas/Failure" }
+
+    SignIn:
+      type: object
+      required: [accessToken, tokenType, expiresIn]
+      properties:
+        accessToken:
+          type: string
+          description: "Present it as `Authorization: Bearer <token>`."
+        tokenType: { type: string, enum: [Bearer] }
+        expiresIn:
+          type: integer
+          description: Seconds until the token expires. There is no refresh flow.

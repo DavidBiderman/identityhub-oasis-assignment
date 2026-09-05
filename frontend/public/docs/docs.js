@@ -53,6 +53,52 @@ function render(token, claims) {
   });
   window.ui = ui;
 
+  // Minting the machine credential, rather than asking somebody to go and find
+  // one.
+  //
+  // The two schemes are deliberately not interchangeable -- an access token is
+  // a person's and lasts an hour, an API key is a machine's and lasts until it
+  // is revoked -- which is correct and, on this page, annoying: signing in
+  // fills one field and leaves the other empty. This mints a key with the token
+  // already held and fills the second field, so the model stays intact and
+  // nobody pastes anything.
+  //
+  // It is a real key, and it appears in the interface's API keys list and in
+  // the audit trail like any other. Revoke it there when finished.
+  document.getElementById("mintkey").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const status = document.getElementById("mintstatus");
+
+    button.disabled = true;
+    status.textContent = " minting…";
+    try {
+      const response = await fetch("/api/api-keys", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + token,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ name: "API documentation page" }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        // Only an administrator may mint one, so this is a real answer rather
+        // than a failure: say which, and leave the field alone.
+        status.textContent =
+          " " + (payload.error ? payload.error.message : "Could not mint a key.");
+        return;
+      }
+
+      ui.preauthorizeApiKey("apiKey", payload.data.secret);
+      button.hidden = true;
+      status.textContent = " filled in — " + payload.data.apiKey.name;
+    } catch (error) {
+      status.textContent = " could not reach the API.";
+    } finally {
+      button.disabled = false;
+    }
+  });
+
   gate.hidden = true;
   loaded.hidden = false;
 }

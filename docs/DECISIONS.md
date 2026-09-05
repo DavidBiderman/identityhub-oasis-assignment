@@ -1081,6 +1081,19 @@ the shell is public and empty, and the thing worth protecting is protected. As a
 side effect the token from signing in is applied to Swagger automatically, so
 "Try it out" works on the first click with nothing to copy.
 
+**One page here, two in a real deployment.** The document describes all twenty
+operations, and it has to: fifteen of them are `/api/*`, and removing them would
+leave fifteen handlers with nothing generating their routes and nothing building
+their authorization. The document is not a docs file that happens to be
+accurate, it is the thing the server is built from.
+
+What a real deployment would change is the *rendering*, not the document. A
+public reference shows the public surface -- Stripe documents `/v1/*`, not the
+endpoints its own dashboard calls -- while an internal page shows everything.
+Here there is one page, behind sign-in, and its reader is somebody evaluating
+the whole system rather than integrating with one endpoint of it. Hiding
+three-quarters of the API from that reader would be the wrong trade.
+
 **What this does not do:** there is no request validator. The spec's `minLength`,
 `maximum` and `pattern` constraints are documentation — they tell a client what
 to send and they are what Swagger renders — and `internal/httpapi/validate.go` is

@@ -189,8 +189,14 @@ func requireAdmin(next echo.HandlerFunc) echo.HandlerFunc {
 				"This endpoint requires an access token.")
 		}
 		if !principal.IsAdmin() {
+			// Deliberately not naming what was refused. This one middleware
+			// guards five endpoints -- connecting and disconnecting an
+			// integration, and minting, listing and revoking API keys -- so a
+			// message about integration settings was wrong for three of them,
+			// and a message naming the endpoint would have to come from the
+			// endpoint rather than from here.
 			return fault(http.StatusForbidden, codeForbidden,
-				"Only an account administrator can change integration settings.")
+				"This requires an account administrator.")
 		}
 		return next(c)
 	}

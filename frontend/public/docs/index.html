@@ -109,10 +109,11 @@
         <br />
         <span class="aside">
           <strong>Authorize</strong> offers a second scheme,
-          <code>apiKey</code>. It is only for <code>POST /api/v1/findings</code>,
-          the endpoint scanners and CI pipelines use. Mint one at
-          <code>POST /api/api-keys</code> and paste it there; leave it empty
-          otherwise.
+          <code>apiKey</code>, and it is not interchangeable with the first: it
+          opens <code>POST /api/v1/findings</code> and nothing else, the way a
+          scanner or a CI pipeline reaches this API.
+          <button type="button" class="identity" id="mintkey">Mint one and fill it in</button>
+          <span id="mintstatus"></span>
         </span>
       </p>
       <div id="swagger"></div>

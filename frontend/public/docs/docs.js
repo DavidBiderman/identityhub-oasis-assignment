@@ -91,8 +91,16 @@ document.getElementById("signin").addEventListener("submit", async (event) => {
     }
 
     const token = payload.data.accessToken;
+    const claims = await claimsFor(token);
+    if (!claims) {
+      // Signed in, and then the API would not accept the token it just issued.
+      // Not a credential problem, so it must not be reported as one.
+      show("Signed in, but the API would not accept the token. Is the stack healthy?");
+      return;
+    }
+
     sessionStorage.setItem(KEY, token);
-    render(token, await claimsFor(token));
+    render(token, claims);
   } catch (error) {
     show("Could not reach the API. Is the stack running?");
   } finally {

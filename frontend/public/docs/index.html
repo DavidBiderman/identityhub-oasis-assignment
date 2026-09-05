@@ -26,6 +26,14 @@
 
       /* The sign-in gate. Centred, narrow, and deliberately plain: it is a
          door, not a page. */
+      /* Any author rule that sets `display` outranks the browser's own
+         [hidden] { display: none }, so setting .hidden on an element styled
+         `display: flex` does nothing at all -- which is how the sign-in form
+         stayed on screen after a successful sign-in, with swagger rendered
+         underneath it. This makes the attribute mean what it says, here and for
+         anything added later. */
+      [hidden] { display: none !important; }
+
       .gate {
         display: flex; align-items: center; justify-content: center;
         min-height: 100vh; background: #fafafa;
@@ -83,7 +91,7 @@
         <input id="password" type="password" autocomplete="current-password" required />
 
         <button type="submit" id="submit">Sign in</button>
-        <p id="failure" class="failure" hidden></p>
+        <p id="failure" class="failure" role="alert" hidden></p>
 
         <p class="aside">
           The seeded accounts are in the README. Signing in here is the same

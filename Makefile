@@ -52,7 +52,6 @@ deploy: build up wait ## Build and run the whole stack, then wait until it is re
 	@echo
 	@echo "  Sign in as admin@acme.test with the password identityhub-demo."
 	@echo "  Three seeded people across two accounts; the README lists them."
-	@echo "  stand-in for an identity provider."
 	@echo
 	@echo "  Connect Jira next: docs/CONNECTING-JIRA.md"
 

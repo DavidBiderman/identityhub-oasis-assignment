@@ -93,18 +93,10 @@ docker compose run --rm bootstrap -force
 
 Other flags: `-skip-kms` and `-skip-seed` run one half without the other.
 
-### Getting a token for the REST API
+### The organization and account IDs
 
-`make token` signs in as a seeded person and prints the token, which is what the
-interface does. To use one from `curl` or from the API documentation:
-
-```bash
-make token                          # admin@acme.test
-EMAIL=secops@acme.test make token   # a different account, to see isolation
-```
-
-The organization and account IDs live in the token's claims, and are also
-readable directly:
+They live in the token's claims and are never sent by a caller, but they are
+readable directly if you want to check what the isolation is isolating:
 
 ```bash
 docker compose exec postgres psql -U identityhub -d identityhub -c \
@@ -114,14 +106,87 @@ docker compose exec postgres psql -U identityhub -d identityhub -c \
 
 ---
 
-## Documentation
+## API documentation
+
+<http://localhost:3000/docs> renders `api/openapi.yaml` — the same document that
+generates the server's routing and decides which operations require which
+credential, so it cannot describe an endpoint that does not exist.
+
+**Sign in on that page with the same credentials as the application.** The
+document itself requires a token, and signing in there fills the authorization
+in for you, so **Try it out** works on the first click with nothing to paste.
+Sign in to the application first and the page skips the form entirely: one
+origin, one session.
+
+### Why there are two kinds of credential
+
+The brief asks for two different callers — people using an interface, and
+scanners and CI pipelines calling an API — and they need different credentials
+for reasons that are not interchangeable:
+
+| | Access token | API key |
+|---|---|---|
+| Who holds it | A person, in their browser | A machine: a scanner, a CI job |
+| Looks like | A signed JWT | `ih_<id>_<secret>` |
+| Obtained by | Signing in | Minting one in the interface |
+| Lives for | One hour | Until it is revoked |
+| Opens | `/api/*` — **15 of the 20 endpoints** | `POST /api/v1/findings`, and nothing else |
+| Revoked by | Signing out, immediately | Revoking it in the interface |
+
+A scanner cannot complete an interactive sign-in, so it cannot hold the first.
+A person should not carry a credential that lives until somebody remembers to
+revoke it, so they should not hold the second. **Neither is a substitute for the
+other**: an API key gets a `401` from every endpoint except the one it is for,
+and an access token gets a `401` from that one.
+
+`GET /api/tickets/{id}` is the single exception and accepts either, because the
+`201` from `POST /api/v1/findings` returns a `Location` pointing at it — and
+refusing the key there would hand a caller a link it cannot follow.
+
+### Using each one
+
+**The access token** is filled in automatically when you sign in on the
+documentation page. To get one for `curl` or Postman instead:
+
+```bash
+make token                          # admin@acme.test
+EMAIL=secops@acme.test make token   # a different account, to see the isolation
+```
+
+That signs in as a seeded person and prints the token — the same request the
+interface makes. Note that it prints an **access token, not an API key**; the
+two are not interchangeable.
+
+```bash
+curl -H "Authorization: Bearer $(make token)" http://localhost:8080/api/tickets
+```
+
+**The API key** is minted in the interface, under **API keys**. It is shown once
+and stored only as a hash, so copy it when it appears. In the documentation
+page, press **Authorize** and paste it into the `apiKey` field — leave that
+field empty otherwise, since only one endpoint reads it:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/findings \
+  -H "Authorization: Bearer ih_..." \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: scan-run-42" \
+  -d '{"projectKey":"NHI","title":"Stale service account: svc-deploy-prod",
+       "description":"Last used 400 days ago."}'
+```
+
+Repeat that request with the same `Idempotency-Key` and it returns the original
+ticket with `created: false` rather than filing a second one.
+
+---
+
+## Design documents
 
 | | |
 |---|---|
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Architecture, and the reasoning behind every significant choice. The table at the top is the whole document in ten minutes |
 | [docs/FLOWS.md](docs/FLOWS.md) | What happens on each path, drawn: a request arriving, connecting Jira, filing a finding, the digest |
 | [docs/CONNECTING-JIRA.md](docs/CONNECTING-JIRA.md) | Connecting a Jira workspace, which API scopes are needed and why |
-| <http://localhost:3000/docs> | Every endpoint, live against the running stack. Sign in and *Try it out* works on the first click |
 
 ---
 

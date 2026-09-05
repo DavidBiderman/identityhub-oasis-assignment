@@ -8,6 +8,10 @@ automation that files a ticket for each new post on the Oasis blog.
 
 ## Run it
 
+**You need Docker, with Compose v2. That is the entire prerequisite** — Docker
+Desktop, Colima, OrbStack and Rancher all work, because everything else is built
+and run inside containers.
+
 ```bash
 docker compose up --build
 ```
@@ -15,6 +19,32 @@ docker compose up --build
 That is the whole setup. It brings up PostgreSQL, Redis, a local KMS, Temporal,
 the API, the worker and the web interface, applies the database schema, creates
 the encryption key, and seeds the demo data described below.
+
+<details>
+<summary>Installing the extras, if you want to run the tests or regenerate code</summary>
+
+Nothing here is needed to *run* the project.
+
+```bash
+brew bundle      # go, node, jq, sqlc, golangci-lint — and Docker if you have none
+make tools       # oapi-codegen, which Homebrew does not carry
+```
+
+Two things about `brew bundle` worth knowing, because neither is obvious:
+
+- **If Docker is already installed but not through Homebrew** — dragged to
+  `/Applications`, or installed by Colima or OrbStack — brew does not recognise
+  it and will try to install Docker Desktop over the top, which **fails** rather
+  than silently reinstalling. Comment out the `cask "docker-desktop"` line in
+  the `Brewfile` first. Your existing Docker is fine.
+- **`brew bundle` upgrades formulae you already have** if they are out of date.
+  `brew bundle install --no-upgrade` installs what is missing and leaves your
+  versions alone.
+
+Without any of this, `docker compose up` still works, and so does everything in
+**What to try** below.
+
+</details>
 
 | | |
 |---|---|

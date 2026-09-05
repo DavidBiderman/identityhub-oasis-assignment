@@ -124,8 +124,18 @@ docs: ## Open the API documentation, where every endpoint can be tried
 	@echo "$(WEB_URL)/docs  --  sign in there; the document requires a token"
 	@command -v open >/dev/null && open $(WEB_URL)/docs || true
 
+.PHONY: tools
+tools: ## Install the code generators Homebrew does not carry
+	@# oapi-codegen has no Homebrew formula, so it comes from the module that
+	@# defines it -- which also pins it to a version this repository builds
+	@# against, rather than whatever a tap happens to hold.
+	cd $(BACKEND) && go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest
+	@echo "installed into $$(cd $(BACKEND) && go env GOPATH)/bin -- make sure that is on your PATH"
+
 .PHONY: generate
 generate: ## Regenerate everything derived from a source of truth
+	@command -v sqlc >/dev/null || { echo "sqlc is not installed. Try: brew bundle"; exit 1; }
+	@command -v oapi-codegen >/dev/null || { echo "oapi-codegen is not installed. Try: make tools"; exit 1; }
 	cd $(BACKEND) && sqlc generate
 	cd $(BACKEND) && oapi-codegen -config api/oapi-codegen.yaml api/openapi.yaml
 	@echo "regenerated: sqlc from db/queries, api types and routing from api/openapi.yaml"

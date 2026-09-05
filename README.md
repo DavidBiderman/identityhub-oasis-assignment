@@ -114,67 +114,14 @@ docker compose exec postgres psql -U identityhub -d identityhub -c \
 
 ---
 
-## What to try
-
-**1. File a finding from the interface.** Sign in, connect Jira, pick a
-project, submit. The ticket appears in Jira and in Recent tickets with a link
-to it.
-
-**2. Watch it run.** Open <http://localhost:8233>. Every ticket is filed by a
-Temporal workflow, so each one is a durable execution you can inspect —
-including its activities, its inputs and any retries.
-
-**3. File one as a scanner would.** Create an API key in the interface, then:
-
-```bash
-curl -X POST http://localhost:8080/api/v1/findings \
-  -H "Authorization: Bearer ih_..." \
-  -H "Idempotency-Key: nightly-scan-001" \
-  -H "Content-Type: application/json" \
-  -d '{"projectKey":"NHI","title":"Stale service account: svc-legacy-etl",
-       "description":"No authentication in 412 days."}'
-```
-
-Run it twice. The second call returns `200` with the original ticket rather than
-`201` with a second one — a CI job that retries after a timeout must not file
-the same finding twice.
-
-**4. Check the isolation.** Switch identity to `secops@acme.test`. No tickets, no
-connection, despite sharing an organization with the account that has both.
-
-**5. Try to smuggle a tenancy.** Add `"accountId"` to any request body. It
-succeeds, and the write lands in the account the *token* names. Nothing rejects
-the field because nothing reads it: the request types have no such field, so the
-value is inert. The property is the missing field, not a check that could be
-forgotten — and a `400` would only have proved that something checked.
-
-**6. Read the API, and try it.** Open <http://localhost:3000/docs> and sign in
-with the same credentials as the application. **The document itself requires a
-token** — it lists every endpoint, field and constraint of an API that manages
-credentials, and publishing that to anyone who asks hands an attacker the map.
-
-Signing in there fills in the authorization for you, so **Try it out** works on
-the first click with nothing to paste. Sign in to the application first and the
-page skips the form: one origin, one session. The page renders
-`api/openapi.yaml`, the same document that generates the server's routing and
-decides which operations require which credential — so it cannot describe an
-endpoint that does not exist.
-
-**7. See the digest schedule.** Connecting Jira creates a Temporal schedule that
-runs every 24 hours, reads the Oasis blog, skips posts already catalogued, and
-files a ticket for each new one. It is visible under **Schedules** in the
-Temporal interface, where you can also trigger a run immediately rather than
-waiting a day. It files into the first project the account can reach unless
-`DIGEST_PROJECT_KEY` names one.
-
----
-
 ## Documentation
 
 | | |
 |---|---|
-| [docs/DECISIONS.md](docs/DECISIONS.md) | Architecture, and the reasoning behind every significant choice |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | Architecture, and the reasoning behind every significant choice. The table at the top is the whole document in ten minutes |
+| [docs/FLOWS.md](docs/FLOWS.md) | What happens on each path, drawn: a request arriving, connecting Jira, filing a finding, the digest |
 | [docs/CONNECTING-JIRA.md](docs/CONNECTING-JIRA.md) | Connecting a Jira workspace, which API scopes are needed and why |
+| <http://localhost:3000/docs> | Every endpoint, live against the running stack. Sign in and *Try it out* works on the first click |
 
 ---
 
@@ -194,6 +141,7 @@ backend/
     httpapi/       routing, authentication middleware, request and response shapes
     auth/          sign-in, access tokens, API keys, roles and revocation
     crypto/        encrypt and decrypt, over the Go CDK
+    config/        environment parsing, validated once at startup
     cache/         the Redis connection: signed-out tokens, keys with deadlines
     connector/     the provider port  ── jira/  the Jira implementation
     capabilities/  what the product asks of a connector ── issuetracker/
@@ -276,30 +224,3 @@ set.
 | `ANTHROPIC_API_KEY` | — | Optional. Without any model key the digest summarizes offline, so the stack runs with no account and no network |
 | `OPENAI_API_KEY` | — | Optional alternative to the above |
 | `BLOG_FEED_URL` | `https://www.oasis.security/blog` | Source for the digest |
-
----
-
-## Notes
-
-- **The Jira credential is itself a non-human identity**, and is treated as one:
-  encrypted by a key service with the tenancy sealed inside the ciphertext,
-  revocable, never displayed after entry, and every use attributed in the audit
-  trail.
-- **The tenancy is in the token, and the token is signed.** Organization,
-  account and roles are claims, checked on every request against an HMAC-SHA256
-  signature — so acting in another tenancy means forging a signature, not
-  editing a request. No request body, query parameter or header names a tenancy;
-  the request types have no field for one.
-- **Signing in is the part a real deployment replaces.** Passwords are bcrypt
-  and this application issues the token; federate instead and Auth0 or Clerk
-  does both. The seam is `auth.TokenResolver`, and the token it produces is
-  identical either way. See [docs/DECISIONS.md](docs/DECISIONS.md) §2a.
-- **The stack is self-contained.** The local KMS speaks the real AWS KMS
-  protocol, so the key-management code path in development is the one that runs
-  against AWS KMS in production — only `SECRETS_KEEPER_URL` differs.
-- **`docker compose down -v` removes the volumes**, including the encryption
-  key. Stored credentials cannot be decrypted afterwards and must be
-  reconnected. `docker compose down` on its own is safe.
-- **`make test` leaves the demo data alone.** The end-to-end tests seed their own
-  organization and delete it afterwards, so running them does not change what a
-  reviewer sees in the interface.

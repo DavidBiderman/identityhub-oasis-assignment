@@ -6,22 +6,18 @@ automation that files a ticket for each new post on the Oasis blog.
 
 ---
 
-## Run it
-
-**Docker, with Compose v2. That is the entire prerequisite** — Docker Desktop,
-Colima, OrbStack and Rancher all work, because everything else is built and run
-inside containers. Nothing is installed on your machine.
+## How to run
 
 ```bash
-docker compose up --build
+docker compose up -d
 ```
 
 That is the whole setup. It brings up PostgreSQL, Redis, a local KMS, Temporal,
 the API, the worker and the web interface, applies the database schema, creates
 the encryption key, and seeds the demo data described below.
 
-The first run builds the images and takes **about 80 seconds**; afterwards the
-stack comes up in under 20.
+The first run builds the images, so it takes a few minutes; after that the stack
+comes up quickly.
 
 | | |
 |---|---|
